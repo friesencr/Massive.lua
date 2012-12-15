@@ -45,5 +45,10 @@ function Table:insert(data)
 		data = {data}
 	end
 
-	local sql = string.format("INSERT INTO %s (%s) VALUES\n", self.name, 
+	local sql = string.format("INSERT INTO %s (%s) VALUES\n", self.name, table.concat(get_keys(data[0]), ", "))
+	local parameters = {}
+	local values = {}
+	for i,v in data do
+
+	end
 end

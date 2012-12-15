@@ -100,6 +100,7 @@ function Query:where(conditions)
 end
 
 function Query:execute(callback)
+	self.db.execute(self.sql, self.params, 
 
 end
 
