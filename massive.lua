@@ -133,17 +133,17 @@ local function when(...)
 				end
 				completed = completed + 1
 				returns[i] = val
-				if completed == total then
-					if failed > 0 then
-						deferred:reject(null_or_unpack(returns))
-					else
-						deferred:resolve(null_or_unpack(returns))
-					end
-				end
 			end)
 		else
 			returns[i] = v
 			completed = completed + 1
+		end
+		if completed == total then
+			if failed > 0 then
+				deferred:reject(null_or_unpack(returns))
+			else
+				deferred:resolve(null_or_unpack(returns))
+			end
 		end
 	end
 	return deferred
@@ -153,13 +153,19 @@ end
 -- END LUA PROMISE
 --
 
-package.loadlib("lsqlite3.dll", "luaopen_lsqlite3")()
+-- package.loadlib("lsqlite3.dll", "luaopen_lsqlite3")()
+require 'lsqlite3'
 
 Massive = {}
 
 local Table = {}
 local Query = {}
 local SQLite = {}
+local Util = {}
+
+Table.__index = Table
+Query.__index = Query
+SQLite.__index = SQLite
 
 local function get_keys(t)
 	local keys = {}
@@ -178,6 +184,7 @@ local function get_values(t)
 end
 
 local string_split = function(s, p)
+	assert(s)
 	local temp = {}
 	local index = 0
 	local last_index = string.len(s)
@@ -194,7 +201,7 @@ local string_split = function(s, p)
 			if index > 0 and index <= last_index then
 				table.insert(temp, string.sub(s, index, last_index))
 			elseif index == 0 then
-				temp = nil
+				temp = {s}
 			end
 			break
 		end
@@ -206,6 +213,12 @@ end
 local function string_trim(s)
   return (s:gsub("^%s*(.-)%s*$", "%1"))
 end
+
+Massive.Util = {}
+Massive.Util.get_keys = get_keys
+Massive.Util.get_values = get_values
+Massive.Util.string_split = string_split
+Massive.Util.string_trim = string_trim
 
 function Table:new(tableName, pk, _db)
 	local obj = {}
@@ -224,20 +237,21 @@ function Table:last()
 	return self:find():last()
 end
 
-function Table:each()
-	return self:find():each()
+function Table:each(func)
+	return self:find():each(func)
 end
 
 function Table:find(...)
-	return Query("SELECT * FROM " .. self.name, {}, self):parseArgs({...})
+	return Query:new("SELECT * FROM " .. self.name, {}, self):parseArgs({...})
 end
 
 function Table:count(where)
-	return Query("SELECT COUNT(1) FROM " .. self.name, {}, self):where(where)
+	local result = Query:new("SELECT COUNT(1) as count FROM " .. self.name, {}, self):where(where):first().count
+	return result
 end
 
 function Table:destroy(...)
-	return Query("DELETE FROM " .. self.name, {}, self):parseArgs({...})
+	return Query:new("DELETE FROM " .. self.name, {}, self):parseArgs({...})
 end
 
 function Table:insert(data)
@@ -262,7 +276,9 @@ function Table:insert(data)
 
 	for i,x in ipairs(data) do
 		table.insert(values, placeholder_text)
-		table.insert(parameters, get_values(x))
+		for a,b in ipairs(get_values(x)) do
+			table.insert(parameters, b)
+		end
 	end
 
 	sql = sql .. table.concat(values, ",\n")
@@ -270,7 +286,7 @@ function Table:insert(data)
 	if (self.db.insertKludge) then
 		sql = sql .. self.db.insertKludge()
 	end
-	return Query:new(sql, parameters, self)
+	return Query:new(sql, parameters, self):execute()
 end
 
 function Table:update(fields, where)
@@ -285,24 +301,36 @@ function Table:update(fields, where)
 	return Query:new(sql, parameters, self):where(where)
 end
 
+Query.operationsMap = {}
+Query.operationsMap['='] = '='
+Query.operationsMap['!'] = '<>'
+Query.operationsMap['>'] = '>'
+Query.operationsMap['<'] = '<'
+Query.operationsMap['>='] = '>='
+Query.operationsMap['<='] = '<='
+Query.operationsMap['!='] = '<>'
+Query.operationsMap['<>'] = '<>'
+
 function Query:new(sql, params, table)
+	if params and type(params) ~= 'table' then params = {params} end
 	local obj = {}
 	setmetatable(obj, Query)
 	obj.sql = sql
-	obj.params = params
+	obj.params = params or {}
 	obj.table = table
 	obj.db = table.db
+	return obj
 end
 
 function Query:order(where)
-	return self._append(' \nORDER BY %s', where)
+	return self:append(' \nORDER BY %s', where)
 end
 
 function Query:limit(count, offset)
 	if not offset then
-		return self:_append(' \nLIMIT %d', count)
+		return self:append(' \nLIMIT %d', count)
 	else
-		return self._append(' \nLIMIT(%d,%d)', count, offset)
+		return self:append(' \nLIMIT(%d,%d)', count, offset)
 	end
 end
 
@@ -324,16 +352,16 @@ function Query:parseArgs(args)
 		else
 			local columns = v.columns or v
 			local ct = type(columns)
-			if ct == 'table' then
-				self.sql = self.sql.replace("*", table.concat(columns, ', '))
+			if ct == 'table' and #columns > 0 then
+				self.sql = string.gsub(self.sql, "*", table.concat(columns, ', '))
 			elseif ct == 'string' then
-				self.sql = self.sql.replace("*", columns)
+				self.sql = string.gsub(self.sql, "*", columns)
 			end
-			arg.columns = nil
+			v.columns = nil
 
 			local where = v.where or v
 			local wt = type(where)
-			if (not type == 'table' and #wt > 0) then
+			if (wt == 'table' and #where == 0) then
 				self:where(where)
 			end
 		end
@@ -347,40 +375,38 @@ function Query:where(conditions)
 
 	local t = type(conditions)
 	if t == 'number' then
-		return self._append(' \nWHERE "%s" = %d', self.table.pk, conditions)
+		return self:append(' \nWHERE "%s" = %d', self.table.pk, conditions)
 	elseif t == 'string' then
-		return self._append(' \nWHERE "%s" = %s', self.table.pk, self.db.placeholder(#self.params))
+		return self:append(' \nWHERE "%s" = "%s"', self.table.pk, self.db.placeholder(#self.params))
 	end
 
 	local _conditions = {}
-	for k,v in pairs(conditions) do
-		local parts = string_split(string_trim(key).split(' +'))
+	for k,value in pairs(conditions) do
+		local parts = string_split(string_trim(k), ' +')
 		local property = parts[1]
-		local operation = parts[2] or '='
+		local operation = Query.operationsMap[parts[2]] or '='
 
 		local vt = type(value)
 		if vt == 'boolean' or vt == 'number' then
 			table.insert(_conditions, string.format('"%s" %s %d', property, operation, value))
+		elseif vt ~= 'table' then
+			table.insert(self.params, value)
+			table.insert(_conditions, string.format('"%s" %s %s', property, operation, self.db.placeholder(#self.params)))
 		else
-			if not vt == 'table' then
-				table.insert(self.params, value)
-				table.insert(_conditions, string.format('"%s" %s %s', property, operation, self.db.placeholder(#self.params)))
-			else
-				local arrayConditions = {}
-				for i,v in ipairs(value) do
-					table.insert(self.params, v)
-					table.insert(arrayConditions, self.db.placeholder(#self.params))
-				end
-				table.insert(_conditions,
-					string.format('"%s" %s (%s)', property,
-						(operation == '!=' or operation == '<>') and 'NOT IN' or 'IN',
-						table.concat(arrayConditions, ', ')
-					)
-				)
+			local arrayConditions = {}
+			for i,c in ipairs(value) do
+				table.insert(self.params, c)
+				table.insert(arrayConditions, self.db.placeholder(#self.params))
 			end
+			table.insert(_conditions,
+				string.format('"%s" %s (%s)', property,
+					operation == '<>' and 'NOT IN' or 'IN',
+					table.concat(arrayConditions, ', ')
+				)
+			)
 		end
 	end
-	return self.append(' \nWHERE ' .. table.concat(_conditions, ' \nAND'))
+	return self:append(' \nWHERE ' .. table.concat(_conditions, ' \nAND'))
 end
 
 function Query:execute()
@@ -388,6 +414,7 @@ function Query:execute()
 end
 
 function Query:each(func)
+	assert(func)
 	local call = self.db:execute(self.sql, self.params)
 	when(call)
 		:done(function(result)
@@ -399,23 +426,22 @@ function Query:each(func)
 end
 
 function Query:first()
-	return self:append(" LIMIT(1) "):execute()
+	return self:append(" LIMIT 1 "):execute()[1]
 end
 
 function Query:last()
-	return self:append(" ORDER BY %s DESC LIMIT(1) ", this.table.pk):execute()
+	return self:append(" ORDER BY %s DESC LIMIT 1 ", this.table.pk):execute()[1]
 end
 
 function Query:append(...)
 	local args = {...}
 	if #args > 0 then
-		self.sql = self.sql .. #args == 1 and
+		self.sql = self.sql .. (#args == 1 and
 			args[1] or
-			string.format(unpack(args))
+			string.format(unpack(args)))
 	end
+	return self
 end
-
-(function()
 
 function SQLite:new(options)
 	options = options or {}
@@ -429,19 +455,23 @@ function SQLite:new(options)
 	}
 
 	obj.tableSQL = [=[
-
+SELECT name FROM sqlite_master
+WHERE type='table'
+ORDER BY name;
 	]=]
 
 	obj.db = obj.filename and
 		sqlite3.open(obj.filename) or
-		sqlite3.open_membory()
+		sqlite3.open_memory()
+
+	setmetatable(obj, SQLite)
 
 	return obj
 end
 
 function SQLite:translateType(typeName)
 	if typeName == 'pk' then
-		typeName = 'INT NOT NULL PRIMARY KEY AUTO_INCREMENT'
+		typeName = 'integer NOT NULL PRIMARY KEY AUTOINCREMENT'
 	elseif typeName == 'money' then
 		typeName = 'decmal'
 	elseif typeName == 'date' then
@@ -456,35 +486,97 @@ function SQLite:placeholder(seed)
 	return '?'
 end
 
-function SQLite:execute(sql, params)
-	for i,v in ipairs(params) do
-		sql = string.gsub(sql, '?', v, 1)
+function SQLite:mapper(row, names)
+	local obj = {}
+	for i,v in names do
+		obj[v] = row[i]
 	end
-	return self.db:exec(sql)
+	return obj
+end
+
+function SQLite:execute(sql, params)
+	assert(sql and sql ~= '')
+	params = params or {}
+	local t
+	for i,v in ipairs(params) do
+		t = type(v)
+		sql = string.gsub(sql, '?', (t == 'string' and "'" .. v .."'" or v), 1)
+	end
+	local data = {}
+	for x in self.db:nrows(sql) do
+		table.insert(data, x)
+	end
+	if self.db:errcode() ~= 0 then
+		error(self.db:errmsg())
+	end
+	return data
 end
 
 function SQLite:run(sql, params)
-	return Query:new(sql, params, self)
+	return Query:new(sql, params, { db = self})
 end
 
 function SQLite:loadTables()
 	local _self = self
-	when(self:execute(self.tableSQL, {}))
-		:done(function(result)
-			for i,v in ipairs(result) do
-				local t = Table:new(table.name, table.pk, _self)
-				table.insert(_self.tables, t)
-				self[t.name] = t
+	local table_list = self:execute(self.tableSQL)
+	local tables = {}
+	for i,v in ipairs(table_list) do
+		local info = self:execute('PRAGMA table_info(?)', {v.name})
+		local t = { name = v.name}
+		for i,row in ipairs(info) do
+			if row.pk == 1 then
+				t.pk = row.name
 			end
-		end)
+		end
+		table.insert(tables, t)
+	end
+	self.tables = {}
+	for i,v in ipairs(tables) do
+		local t = Table:new(v.name, v.pk, self)
+		table.insert(self.tables, t)
+		self[v.name] = t
+	end
 	return self
 end
 
 function SQLite:dropTable(tableName)
-	return self:execute("DROP TABLE IF EXISTS " .. tableName + ";")
+	return self:execute("DROP TABLE IF EXISTS " .. tableName + ";"):execute()
 end
 
-end)()
+function SQLite:createTable(tableName, columns)
+	local _sql = "CREATE TABLE " .. tableName .. "\n(\n"
+	local _cols = {}
+
+	local _pk
+	for k,v in pairs(columns) do
+		if v == 'pk' then _pk = k end
+	end
+
+	if not _pk then
+		columns.id = 'pk'
+		_pk = 'id'
+	end
+
+	for k,v in pairs(columns) do
+		local colName, colParts, colType, translated, extras, declaration
+		colName = k
+		colParts = string_split(v, " ") or {v}
+		colType = colParts[1]
+		translated = SQLite:translateType(colType)
+		extras = {}
+		if #colParts > 2 then
+			for i=3, #colParts do
+				table.insert(extra, colParts[i])
+			end
+		end
+		extras = table.concat(extras, ' ')
+		declaration = string_trim(string_trim(colName) .. ' ' .. string_trim(translated) .. ' ' .. string_trim(extras))
+		table.insert(_cols, declaration)
+	end
+
+	_sql = _sql .. table.concat(_cols, ',\n') .. "\n);"
+	return Query:new(_sql, {}, Table:new(tableName, _pk, self)):execute()
+end
 
 Massive.Table = Table
 Massive.Query = Query
