@@ -154,7 +154,7 @@ end
 --
 
 -- package.loadlib("lsqlite3.dll", "luaopen_lsqlite3")()
-require 'lsqlite3'
+-- require 'lsqlite3'
 
 Massive = {}
 
@@ -286,7 +286,9 @@ function Table:insert(data)
 	if (self.db.insertKludge) then
 		sql = sql .. self.db.insertKludge()
 	end
-	return Query:new(sql, parameters, self):execute()
+
+	local q = Query:new(sql, parameters, self):execute()
+	return self.db:lastrowid()
 end
 
 function Table:update(fields, where)
@@ -466,6 +468,8 @@ ORDER BY name;
 
 	setmetatable(obj, SQLite)
 
+	obj:loadTables()
+
 	return obj
 end
 
@@ -486,12 +490,8 @@ function SQLite:placeholder(seed)
 	return '?'
 end
 
-function SQLite:mapper(row, names)
-	local obj = {}
-	for i,v in names do
-		obj[v] = row[i]
-	end
-	return obj
+function SQLite:lastrowid()
+	return self.db.lastrowid
 end
 
 function SQLite:execute(sql, params)
